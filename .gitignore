@@ -1,0 +1,44 @@
+# Virtual environments
+.venv/
+
+# Python cache and compiled files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+
+# Distribution and build artifacts
+dist/
+build/
+
+# Testing and coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Type checking
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Linting and formatting
+.ruff_cache/
+
+# IDE and editor artifacts
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Doxygen generated files
+doxygen_output/
+
+# Logs
+*.log
+
+# OS-specific files
+Thumbs.db
