@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from pathlib import Path
-import re
 
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtGui import QAction, QColor, QFont, QKeySequence
@@ -24,11 +24,11 @@ from PySide6.QtWidgets import (
 )
 
 from .core import (
-    AssetLicenseCore,
-    AssetRecord,
     STATUS_FILE_NOT_FOUND,
     STATUS_FILLED,
     STATUS_MISSING,
+    AssetLicenseCore,
+    AssetRecord,
 )
 
 
@@ -88,6 +88,9 @@ class AssetLicenseMainWindow(QMainWindow):
     COLUMN_URL = 5
     COLUMN_ATTRIBUTION = 6
     COLUMN_HEADERS = ("[選]", "Status", "Genre", "Category", "File Name", "URL", "Attribution")
+    MARKDOWN_LINK_PATTERN = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
+    BLANK_LINE_PATTERN = re.compile(r"\n{3,}")
+    NC_ID_PATTERN = re.compile(r"nc\d+")
 
     def __init__(self, root_dir: str | Path | None = None) -> None:
         """メインウィンドウを初期化する。
@@ -122,6 +125,7 @@ class AssetLicenseMainWindow(QMainWindow):
         self.select_dir_button = QPushButton("素材フォルダ選択")
         self.sync_button = QPushButton("同期")
         self.prune_button = QPushButton("File not foundを一括削除")
+        self.delete_selected_button = QPushButton("選択行を削除（JSONから除外）")
         self.save_button = QPushButton("保存")
         self.generate_button = QPushButton("テキスト生成")
         self.path_label = QLabel("素材ルート: 未選択")
@@ -129,6 +133,7 @@ class AssetLicenseMainWindow(QMainWindow):
         toolbar_layout.addWidget(self.select_dir_button)
         toolbar_layout.addWidget(self.sync_button)
         toolbar_layout.addWidget(self.prune_button)
+        toolbar_layout.addWidget(self.delete_selected_button)
         toolbar_layout.addWidget(self.save_button)
         toolbar_layout.addWidget(self.generate_button)
         toolbar_layout.addWidget(self.path_label, 1)
@@ -136,6 +141,8 @@ class AssetLicenseMainWindow(QMainWindow):
         self.table = AssetTableWidget()
         self.table.setColumnCount(len(self.COLUMN_HEADERS))
         self.table.setHorizontalHeaderLabels(list(self.COLUMN_HEADERS))
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.ExtendedSelection)
         self.table.horizontalHeader().sectionClicked.connect(self._toggle_check_column)
         self.table.itemChanged.connect(self._on_item_changed)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -145,6 +152,7 @@ class AssetLicenseMainWindow(QMainWindow):
         self.select_dir_button.clicked.connect(self.select_root_directory)
         self.sync_button.clicked.connect(self.synchronize)
         self.prune_button.clicked.connect(self.prune_file_not_found_rows)
+        self.delete_selected_button.clicked.connect(self.remove_selected_rows)
         self.save_button.clicked.connect(self.save_current_records)
         self.generate_button.clicked.connect(self.generate_credit_text)
 
@@ -204,36 +212,17 @@ class AssetLicenseMainWindow(QMainWindow):
         if not path:
             return
 
-        credit_lines: list[str] = []
-        unfilled_paths: list[str] = []
-        nc_ids: list[str] = []
-
-        for record in self._iter_checked_records():
-            text_body = " ".join([record.url, record.attribution]).strip()
-            if not text_body:
-                unfilled_paths.append(record.path)
-                continue
-            if record.attribution:
-                credit_lines.append(record.attribution)
-            if record.url:
-                credit_lines.append(record.url)
-
-            for found in re.findall(r"nc\d+", text_body):
-                if found not in nc_ids:
-                    nc_ids.append(found)
-
-        credit_text = "\n".join(credit_lines)
-        nc_text = " ".join(nc_ids)
-        unfilled_text = "\n".join(unfilled_paths)
-        output = (
-            "【クレジット表記】\n"
-            f"{credit_text}\n\n"
-            "【ニコニ・コモンズ 親作品登録用ID】\n"
-            f"{nc_text}\n\n"
-            "【出展確認素材（要確認リスト）】\n"
-            f"{unfilled_text}\n"
-        )
+        output = self._build_credit_output()
         Path(path).write_text(output, encoding="utf-8", newline="\n")
+
+    def remove_selected_rows(self) -> None:
+        """選択行を削除してJSON保存対象から除外する。"""
+        selected_rows = sorted({index.row() for index in self.table.selectedIndexes()}, reverse=True)
+        if not selected_rows:
+            return
+        for row in selected_rows:
+            self.table.removeRow(row)
+        self.is_dirty = True
 
     def remove_row_by_index(self, row: int) -> None:
         """指定行を削除してDirtyフラグを立てる。
@@ -345,6 +334,7 @@ class AssetLicenseMainWindow(QMainWindow):
         if item is None:
             return
 
+        self.table.selectRow(item.row())
         menu = QMenu(self.table)
         delete_action = QAction("この項目を削除（JSONから除外）", self.table)
         row = item.row()
@@ -410,6 +400,53 @@ class AssetLicenseMainWindow(QMainWindow):
         """指定セル文字列を返す。"""
         item = self.table.item(row, column)
         return "" if item is None else item.text()
+
+    def _build_credit_output(self) -> str:
+        """チェック済み行から概要欄用テキストを組み立てる。"""
+        credit_lines: list[str] = []
+        unfilled_paths: list[str] = []
+        nc_ids: list[str] = []
+        seen_attributions: set[str] = set()
+
+        for record in self._iter_checked_records():
+            url = self._sanitize_markdown_text(record.url.strip())
+            attribution = self._sanitize_markdown_text(record.attribution.strip())
+            combined = f"{url}\n{attribution}".strip()
+            if not combined:
+                unfilled_paths.append(record.path)
+                continue
+
+            if attribution and attribution not in seen_attributions:
+                credit_lines.append(attribution)
+                seen_attributions.add(attribution)
+            if url:
+                credit_lines.append(url)
+
+            for text in (url, attribution):
+                for found in self.NC_ID_PATTERN.findall(text):
+                    if found not in nc_ids:
+                        nc_ids.append(found)
+
+        credit_text = self._collapse_blank_lines("\n".join(credit_lines))
+        nc_text = " ".join(nc_ids)
+        unfilled_text = "\n".join(unfilled_paths)
+        return (
+            "【クレジット表記】\n"
+            f"{credit_text}\n\n"
+            "【ニコニ・コモンズ 親作品登録用ID】\n"
+            f"{nc_text}\n\n"
+            "【出展確認素材（要確認リスト）】\n"
+            f"{unfilled_text}\n"
+        )
+
+    def _sanitize_markdown_text(self, text: str) -> str:
+        """Markdownリンクをテキスト形式へ置換する。"""
+        replaced = self.MARKDOWN_LINK_PATTERN.sub(r"\1 (\2)", text)
+        return self._collapse_blank_lines(replaced)
+
+    def _collapse_blank_lines(self, text: str) -> str:
+        """連続空行を最大1行に圧縮する。"""
+        return self.BLANK_LINE_PATTERN.sub("\n\n", text)
 
     def _apply_row_style(self, row: int, status: str) -> None:
         """ステータスに応じた行スタイルを適用する。"""

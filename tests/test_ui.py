@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 from PySide6.QtGui import QCloseEvent
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QMessageBox
 
 from asset_license_manager.core import STATUS_FILE_NOT_FOUND, STATUS_FILLED, STATUS_MISSING
@@ -124,6 +125,56 @@ def test_prune_file_not_found_removes_rows_and_sets_dirty(tmp_path: Path, qtbot)
     ]
     assert STATUS_FILE_NOT_FOUND not in statuses
     assert window.is_dirty is True
+
+
+def test_remove_selected_rows_from_toolbar_sets_dirty(tmp_path: Path, qtbot) -> None:
+    """ツールバー削除で選択行が除外される。"""
+    root = _prepare_assets_root(tmp_path)
+    window = AssetLicenseMainWindow()
+    qtbot.addWidget(window)
+    window.set_root_directory(root)
+    window.is_dirty = False
+
+    target_row = _find_row_by_file_name(window, "filled.wav")
+    window.table.selectRow(target_row)
+    qtbot.mouseClick(window.delete_selected_button, Qt.LeftButton)
+
+    file_names = [
+        window.table.item(row, window.COLUMN_FILE_NAME).text()
+        for row in range(window.table.rowCount())
+    ]
+    assert "filled.wav" not in file_names
+    assert window.is_dirty is True
+
+
+def test_generate_credit_text_writes_expected_sections(tmp_path: Path, qtbot, monkeypatch) -> None:
+    """テキスト生成で指定フォーマットのファイルが保存される。"""
+    root = _prepare_assets_root(tmp_path)
+    window = AssetLicenseMainWindow()
+    qtbot.addWidget(window)
+    window.set_root_directory(root)
+
+    missing_row = _find_row_by_file_name(window, "missing.mp3")
+    filled_row = _find_row_by_file_name(window, "filled.wav")
+    window.table.item(missing_row, window.COLUMN_CHECK).setCheckState(Qt.Checked)
+    window.table.item(filled_row, window.COLUMN_CHECK).setCheckState(Qt.Checked)
+    window.table.item(filled_row, window.COLUMN_ATTRIBUTION).setText("[SE素材](https://commons.nicovideo.jp/material/nc12345)")
+
+    output_path = tmp_path / "credit.txt"
+    monkeypatch.setattr(
+        "asset_license_manager.ui.QFileDialog.getSaveFileName",
+        lambda *_a, **_k: (str(output_path), "Text Files (*.txt)"),
+    )
+
+    window.generate_credit_text()
+    output = output_path.read_text(encoding="utf-8")
+
+    assert "【クレジット表記】" in output
+    assert "SE素材 (https://commons.nicovideo.jp/material/nc12345)" in output
+    assert "【ニコニ・コモンズ 親作品登録用ID】" in output
+    assert "nc12345" in output
+    assert "【出展確認素材（要確認リスト）】" in output
+    assert "audio/bgm/missing.mp3" in output
 
 
 def test_close_event_behavior_follows_dirty_state(tmp_path: Path, qtbot, monkeypatch) -> None:
