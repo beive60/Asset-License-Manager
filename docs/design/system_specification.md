@@ -171,7 +171,7 @@ JSONのルート構造は、素材ルートディレクトリからの「正規�
   * `Status` が `File not found` の行: 文字色をグレーアウトまたは打ち消し線スタイルにし、実体が存在しないことを明示する。
   * 長い文字列が見切れないよう、`URL` と `Attribution` 列の各セルには `setToolTip` で内容全文を表示させる。
 
-- **セル編集権限とペースト挙動**:
+* **セル編集権限とペースト挙動**:
   * `URL` 列および `Attribution` 列のみダブルクリック等で編集可能（Editable）とする。
   * `File Name`, `Genre`, `Category`, `Status` 列は読み取り専用（ReadOnly）とする。
   * `QTableWidget` の `keyPressEvent` をオーバーライドし、Excelライクなペースト（Ctrl+V）を実装する。

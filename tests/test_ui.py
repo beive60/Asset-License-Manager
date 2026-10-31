@@ -6,12 +6,11 @@ import json
 from pathlib import Path
 
 import pytest
-from PySide6.QtGui import QCloseEvent
-from PySide6.QtCore import QSettings, Qt
-from PySide6.QtWidgets import QApplication, QMessageBox
-
 from asset_license_manager.core import STATUS_FILE_NOT_FOUND, STATUS_FILLED, STATUS_MISSING
 from asset_license_manager.ui import AssetLicenseMainWindow
+from PySide6.QtCore import QSettings, Qt
+from PySide6.QtGui import QCloseEvent
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 
 @pytest.fixture(autouse=True)
@@ -152,10 +151,7 @@ def test_prune_file_not_found_removes_rows_and_sets_dirty(tmp_path: Path, qtbot)
 
     window.prune_file_not_found_rows()
 
-    statuses = [
-        window.table.item(row, window.COLUMN_STATUS).text()
-        for row in range(window.table.rowCount())
-    ]
+    statuses = [window.table.item(row, window.COLUMN_STATUS).text() for row in range(window.table.rowCount())]
     assert STATUS_FILE_NOT_FOUND not in statuses
     assert window.is_dirty is True
 
@@ -172,10 +168,7 @@ def test_remove_selected_rows_from_toolbar_sets_dirty(tmp_path: Path, qtbot) -> 
     window.table.selectRow(target_row)
     qtbot.mouseClick(window.delete_selected_button, Qt.LeftButton)
 
-    file_names = [
-        window.table.item(row, window.COLUMN_FILE_NAME).text()
-        for row in range(window.table.rowCount())
-    ]
+    file_names = [window.table.item(row, window.COLUMN_FILE_NAME).text() for row in range(window.table.rowCount())]
     assert "filled.wav" not in file_names
     assert window.is_dirty is True
 
@@ -191,7 +184,9 @@ def test_generate_credit_text_writes_expected_sections(tmp_path: Path, qtbot, mo
     filled_row = _find_row_by_file_name(window, "filled.wav")
     window.table.item(missing_row, window.COLUMN_CHECK).setCheckState(Qt.Checked)
     window.table.item(filled_row, window.COLUMN_CHECK).setCheckState(Qt.Checked)
-    window.table.item(filled_row, window.COLUMN_ATTRIBUTION).setText("[SE素材]\\n詳細(https://commons.nicovideo.jp/material/nc12345)")
+    window.table.item(filled_row, window.COLUMN_ATTRIBUTION).setText(
+        "[SE素材]\\n詳細(https://commons.nicovideo.jp/material/nc12345)"
+    )
     window.table.item(filled_row, window.COLUMN_URL).setText("https://example.com/path\\nhttps://example.com/path2")
 
     output_path = tmp_path / "credit.txt"
