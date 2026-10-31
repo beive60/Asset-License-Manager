@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-
 
 ASSET_JSON_FILES: dict[str, str] = {
     "audio": "audio-assets-license.json",
