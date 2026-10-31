@@ -8,9 +8,9 @@ from pathlib import Path
 import pytest
 from asset_license_manager.core import STATUS_FILE_NOT_FOUND, STATUS_FILLED, STATUS_MISSING
 from asset_license_manager.ui import AssetLicenseMainWindow
-from PySide6.QtCore import QSettings, Qt
-from PySide6.QtGui import QCloseEvent
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtCore import QItemSelectionModel, QSettings, Qt
+from PySide6.QtGui import QCloseEvent, QKeyEvent
+from PySide6.QtWidgets import QAbstractItemView, QApplication, QMessageBox
 
 
 @pytest.fixture(autouse=True)
@@ -78,13 +78,15 @@ def _find_row_by_file_name(window: AssetLicenseMainWindow, file_name: str) -> in
 
 
 def test_main_window_initializes_with_table_structure(qtbot) -> None:
-    """ウィンドウ初期化時に基本UI構造が生成される。"""
+    """ウィンドウ初期化時に基本UI構造とセル選択モードが生成される。"""
     window = AssetLicenseMainWindow()
     qtbot.addWidget(window)
 
     assert window.table.columnCount() == 7
     assert window.table.horizontalHeaderItem(window.COLUMN_CHECK).text() == ""
     assert window.table.horizontalHeaderItem(window.COLUMN_ATTRIBUTION).text() == "Attribution"
+    assert window.table.selectionMode() == QAbstractItemView.ExtendedSelection
+    assert window.table.selectionBehavior() == QAbstractItemView.SelectItems
     assert window.table.rowCount() == 0
     assert window.is_dirty is False
 
@@ -174,7 +176,7 @@ def test_remove_selected_rows_from_toolbar_sets_dirty(tmp_path: Path, qtbot) -> 
 
 
 def test_generate_credit_text_writes_expected_sections(tmp_path: Path, qtbot, monkeypatch) -> None:
-    """テキスト生成で指定フォーマットのファイルが保存される。"""
+    """テキスト生成で指定フォーマットのファイルが保存される（Markdownサニタイズなし）。"""
     root = _prepare_assets_root(tmp_path)
     window = AssetLicenseMainWindow()
     qtbot.addWidget(window)
@@ -185,7 +187,7 @@ def test_generate_credit_text_writes_expected_sections(tmp_path: Path, qtbot, mo
     window.table.item(missing_row, window.COLUMN_CHECK).setCheckState(Qt.Checked)
     window.table.item(filled_row, window.COLUMN_CHECK).setCheckState(Qt.Checked)
     window.table.item(filled_row, window.COLUMN_ATTRIBUTION).setText(
-        "[SE素材]\\n詳細(https://commons.nicovideo.jp/material/nc12345)"
+        "[SE素材](https://commons.nicovideo.jp/material/nc12345)"
     )
     window.table.item(filled_row, window.COLUMN_URL).setText("https://example.com/path\\nhttps://example.com/path2")
 
@@ -199,13 +201,38 @@ def test_generate_credit_text_writes_expected_sections(tmp_path: Path, qtbot, mo
     output = output_path.read_text(encoding="utf-8")
 
     assert "【クレジット表記】" in output
-    assert "SE素材" in output
-    assert "詳細(https://commons.nicovideo.jp/material/nc12345)" in output
+    assert "[SE素材](https://commons.nicovideo.jp/material/nc12345)" in output
     assert "https://example.com/path\nhttps://example.com/path2" in output
     assert "【ニコニ・コモンズ 親作品登録用ID】" in output
     assert "nc12345" in output
     assert "【出展確認素材（要確認リスト）】" in output
     assert "audio/bgm/missing.mp3" in output
+
+
+def test_copy_selected_cells_stores_tsv_in_clipboard(tmp_path: Path, qtbot) -> None:
+    """URLとAttributionの2セルを選択してCtrl+CでTSVコピーできる。"""
+    root = _prepare_assets_root(tmp_path)
+    window = AssetLicenseMainWindow()
+    qtbot.addWidget(window)
+    window.show()
+    window.set_root_directory(root)
+
+    filled_row = _find_row_by_file_name(window, "filled.wav")
+    window.table.item(filled_row, window.COLUMN_URL).setText("https://example.com/copied")
+    window.table.item(filled_row, window.COLUMN_ATTRIBUTION).setText("Copied Author")
+
+    selection_model = window.table.selectionModel()
+    selection_model.clearSelection()
+    url_index = window.table.model().index(filled_row, window.COLUMN_URL)
+    attr_index = window.table.model().index(filled_row, window.COLUMN_ATTRIBUTION)
+    selection_model.select(url_index, QItemSelectionModel.Select)
+    selection_model.select(attr_index, QItemSelectionModel.Select)
+
+    QApplication.clipboard().clear()
+    copy_event = QKeyEvent(QKeyEvent.KeyPress, Qt.Key_C, Qt.ControlModifier)
+    window.table.keyPressEvent(copy_event)
+
+    assert QApplication.clipboard().text() == "https://example.com/copied\tCopied Author"
 
 
 def test_intelligent_paste_repeats_single_row_for_multi_selection(tmp_path: Path, qtbot, monkeypatch) -> None:

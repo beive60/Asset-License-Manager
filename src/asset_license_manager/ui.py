@@ -9,6 +9,7 @@ from pathlib import Path
 from PySide6.QtCore import QPoint, QSettings, Qt, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QKeySequence
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QFileDialog,
     QHBoxLayout,
@@ -33,21 +34,49 @@ from .core import (
 
 
 class AssetTableWidget(QTableWidget):
-    """URL/Attribution 列への複数セル貼り付けを扱うテーブル。"""
+    """URL/Attribution 列への複数セルコピー＆貼り付けを扱うテーブル。"""
 
     EDITABLE_COLUMNS = {5, 6}
     pasteApplied = Signal()
 
     def keyPressEvent(self, event) -> None:  # type: ignore[override]
-        """貼り付けショートカットを処理する。
+        """コピーおよび貼り付けショートカットを処理する。
 
         Args:
             event: キーイベント。
         """
+        if event.matches(QKeySequence.Copy):
+            self._copy_tabular_text()
+            event.accept()
+            return
         if event.matches(QKeySequence.Paste):
             self._paste_tabular_text()
+            event.accept()
             return
         super().keyPressEvent(event)
+
+    def _copy_tabular_text(self) -> None:
+        """選択中のセル範囲をTSV形式でクリップボードへ格納する。"""
+        indexes = self.selectedIndexes()
+        if not indexes:
+            return
+
+        rows = sorted({index.row() for index in indexes})
+        cols = sorted({index.column() for index in indexes})
+        selected_coords = {(index.row(), index.column()) for index in indexes}
+
+        tsv_lines: list[str] = []
+        for row in rows:
+            row_values: list[str] = []
+            for col in cols:
+                if (row, col) in selected_coords:
+                    item = self.item(row, col)
+                    row_values.append("" if item is None else item.text())
+                else:
+                    row_values.append("")
+            tsv_lines.append("\t".join(row_values))
+
+        QApplication.clipboard().setText("\n".join(tsv_lines))
 
     def _paste_tabular_text(self) -> None:
         """クリップボードのTSVテキストを現在セル起点で貼り付ける。"""
@@ -115,7 +144,6 @@ class AssetLicenseMainWindow(QMainWindow):
     COLUMN_URL = 5
     COLUMN_ATTRIBUTION = 6
     COLUMN_HEADERS = ("", "Status", "Genre", "Category", "File Name", "URL", "Attribution")
-    MARKDOWN_LINK_PATTERN = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
     BLANK_LINE_PATTERN = re.compile(r"\n{3,}")
     NC_ID_PATTERN = re.compile(r"nc\d+")
     SETTINGS_ORG = "asset-license-manager"
@@ -169,21 +197,22 @@ class AssetLicenseMainWindow(QMainWindow):
         toolbar_layout.addWidget(self.delete_selected_button)
         toolbar_layout.addWidget(self.save_button)
         toolbar_layout.addWidget(self.generate_button)
-        toolbar_layout.addWidget(self.path_label, 1)
+        toolbar_layout.addWidget(self.path_label)
 
         self.table = AssetTableWidget()
         self.table.setColumnCount(len(self.COLUMN_HEADERS))
         self.table.setHorizontalHeaderLabels(list(self.COLUMN_HEADERS))
-        self.table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.table.setSelectionMode(QTableWidget.ExtendedSelection)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectItems)
+        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.table.setEditTriggers(
+            QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed | QAbstractItemView.AnyKeyPressed
+        )
         self.table.horizontalHeader().sectionClicked.connect(self._toggle_check_column)
         self.table.itemChanged.connect(self._on_item_changed)
         self.table.pasteApplied.connect(self._on_table_paste_applied)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._show_context_menu)
         root_layout.addWidget(self.table)
-        root_layout.setStretch(0, 0)
-        root_layout.setStretch(1, 1)
 
         self.select_dir_button.clicked.connect(self.select_root_directory)
         self.sync_button.clicked.connect(self.synchronize)
@@ -230,8 +259,8 @@ class AssetLicenseMainWindow(QMainWindow):
             self.is_dirty = True
 
     def _on_table_paste_applied(self) -> None:
-            """ペースト操作後にDirtyフラグを立てる。"""
-            self.is_dirty = True
+        """ペースト操作後にDirtyフラグを立てる。"""
+        self.is_dirty = True
 
     def save_current_records(self) -> None:
         """現在グリッドの内容をJSONへ保存する。"""
@@ -467,8 +496,8 @@ class AssetLicenseMainWindow(QMainWindow):
         seen_attributions: set[str] = set()
 
         for record in self._iter_checked_records():
-            url = self._sanitize_markdown_text(record.url.strip())
-            attribution = self._sanitize_markdown_text(record.attribution.strip())
+            url = self._normalize_credit_field(record.url.strip())
+            attribution = self._normalize_credit_field(record.attribution.strip())
             combined = f"{url}\n{attribution}".strip()
             if not combined:
                 unfilled_paths.append(record.path)
@@ -497,11 +526,9 @@ class AssetLicenseMainWindow(QMainWindow):
             f"{unfilled_text}\n"
         )
 
-    def _sanitize_markdown_text(self, text: str) -> str:
-        """Markdownリンクをテキスト形式へ置換する。"""
-        text = text.replace("\\n", "\n")
-        replaced = self.MARKDOWN_LINK_PATTERN.sub(r"\1 (\2)", text)
-        return self._collapse_blank_lines(replaced)
+    def _normalize_credit_field(self, text: str) -> str:
+        """エスケープ改行を展開し、連続空行を圧縮する。"""
+        return self._collapse_blank_lines(text.replace("\\n", "\n"))
 
     def _collapse_blank_lines(self, text: str) -> str:
         """連続空行を最大1行に圧縮する。"""
