@@ -5,7 +5,7 @@ a = Analysis(
     ['src/asset_license_manager/main.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[('assets/icon/icon.ico', 'assets/icon')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -32,6 +32,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=['assets/icon/icon.ico'],
 )
 coll = COLLECT(
     exe,
