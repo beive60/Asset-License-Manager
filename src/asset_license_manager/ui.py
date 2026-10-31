@@ -6,7 +6,7 @@ import re
 from collections.abc import Iterable
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import QPoint, QSettings, Qt, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
@@ -36,6 +36,7 @@ class AssetTableWidget(QTableWidget):
     """URL/Attribution 列への複数セル貼り付けを扱うテーブル。"""
 
     EDITABLE_COLUMNS = {5, 6}
+    pasteApplied = Signal()
 
     def keyPressEvent(self, event) -> None:  # type: ignore[override]
         """貼り付けショートカットを処理する。
@@ -50,20 +51,41 @@ class AssetTableWidget(QTableWidget):
 
     def _paste_tabular_text(self) -> None:
         """クリップボードのTSVテキストを現在セル起点で貼り付ける。"""
-        start_row = self.currentRow()
-        start_col = self.currentColumn()
+        ranges = self.selectedRanges()
+        if ranges:
+            start_row = min(selection.topRow() for selection in ranges)
+            start_col = min(selection.leftColumn() for selection in ranges)
+        else:
+            start_row = self.currentRow()
+            start_col = self.currentColumn()
         if start_row < 0 or start_col < 0:
             return
+        if start_col not in self.EDITABLE_COLUMNS and self.currentColumn() in self.EDITABLE_COLUMNS:
+            start_col = self.currentColumn()
         text = QApplication.clipboard().text()
         if not text:
             return
 
         rows = text.splitlines()
-        for row_offset, row_text in enumerate(rows):
-            target_row = start_row + row_offset
-            if target_row >= self.rowCount():
-                break
-            values = row_text.split("\t")
+        if not rows:
+            return
+        parsed_rows = [row_text.split("\t") for row_text in rows]
+        if not parsed_rows:
+            return
+
+        is_single_clipboard_row = len(parsed_rows) == 1
+        selected_rows_set = {index.row() for index in self.selectedIndexes()}
+        for selection in ranges:
+            selected_rows_set.update(range(selection.topRow(), selection.bottomRow() + 1))
+        selected_rows = sorted(selected_rows_set)
+        should_repeat = is_single_clipboard_row and len(selected_rows) > 1
+        target_rows = selected_rows if should_repeat else list(range(start_row, start_row + len(parsed_rows)))
+
+        has_changes = False
+        for row_index, target_row in enumerate(target_rows):
+            if target_row < 0 or target_row >= self.rowCount():
+                continue
+            values = parsed_rows[0] if should_repeat else parsed_rows[row_index]
             for col_offset, value in enumerate(values):
                 target_col = start_col + col_offset
                 if target_col >= self.columnCount():
@@ -74,7 +96,12 @@ class AssetTableWidget(QTableWidget):
                 if item is None:
                     item = QTableWidgetItem()
                     self.setItem(target_row, target_col, item)
-                item.setText(value)
+                if item.text() != value:
+                    item.setText(value)
+                    has_changes = True
+
+        if has_changes:
+            self.pasteApplied.emit()
 
 
 class AssetLicenseMainWindow(QMainWindow):
@@ -87,10 +114,13 @@ class AssetLicenseMainWindow(QMainWindow):
     COLUMN_FILE_NAME = 4
     COLUMN_URL = 5
     COLUMN_ATTRIBUTION = 6
-    COLUMN_HEADERS = ("[選]", "Status", "Genre", "Category", "File Name", "URL", "Attribution")
+    COLUMN_HEADERS = ("", "Status", "Genre", "Category", "File Name", "URL", "Attribution")
     MARKDOWN_LINK_PATTERN = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
     BLANK_LINE_PATTERN = re.compile(r"\n{3,}")
     NC_ID_PATTERN = re.compile(r"nc\d+")
+    SETTINGS_ORG = "asset-license-manager"
+    SETTINGS_APP = "AssetLicenseManager"
+    SETTINGS_LAST_ROOT_KEY = "last_root_dir"
 
     def __init__(self, root_dir: str | Path | None = None) -> None:
         """メインウィンドウを初期化する。
@@ -104,6 +134,7 @@ class AssetLicenseMainWindow(QMainWindow):
 
         self.core: AssetLicenseCore | None = None
         self.current_root_dir: Path | None = None
+        self.settings = QSettings(self.SETTINGS_ORG, self.SETTINGS_APP)
         self.is_dirty = False
         self._is_populating = False
         self._header_checked = False
@@ -112,6 +143,8 @@ class AssetLicenseMainWindow(QMainWindow):
 
         if root_dir is not None:
             self.set_root_directory(root_dir)
+        else:
+            self._restore_last_root_directory()
 
     def _build_ui(self) -> None:
         """メインレイアウトとウィジェットを構築する。"""
@@ -145,9 +178,12 @@ class AssetLicenseMainWindow(QMainWindow):
         self.table.setSelectionMode(QTableWidget.ExtendedSelection)
         self.table.horizontalHeader().sectionClicked.connect(self._toggle_check_column)
         self.table.itemChanged.connect(self._on_item_changed)
+        self.table.pasteApplied.connect(self._on_table_paste_applied)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._show_context_menu)
         root_layout.addWidget(self.table)
+        root_layout.setStretch(0, 0)
+        root_layout.setStretch(1, 1)
 
         self.select_dir_button.clicked.connect(self.select_root_directory)
         self.sync_button.clicked.connect(self.synchronize)
@@ -170,6 +206,7 @@ class AssetLicenseMainWindow(QMainWindow):
         """
         self.current_root_dir = Path(root_dir)
         self.core = AssetLicenseCore(self.current_root_dir)
+        self.settings.setValue(self.SETTINGS_LAST_ROOT_KEY, str(self.current_root_dir))
         self.path_label.setText(f"素材ルート: {self.current_root_dir}")
         self.synchronize()
 
@@ -190,6 +227,10 @@ class AssetLicenseMainWindow(QMainWindow):
                 self.table.removeRow(row)
                 removed = True
         if removed:
+            self.is_dirty = True
+
+    def _on_table_paste_applied(self) -> None:
+            """ペースト操作後にDirtyフラグを立てる。"""
             self.is_dirty = True
 
     def save_current_records(self) -> None:
@@ -214,6 +255,15 @@ class AssetLicenseMainWindow(QMainWindow):
 
         output = self._build_credit_output()
         Path(path).write_text(output, encoding="utf-8", newline="\n")
+
+    def _restore_last_root_directory(self) -> None:
+        """前回使用した素材ルートを復元し、存在すれば同期する。"""
+        stored = self.settings.value(self.SETTINGS_LAST_ROOT_KEY, "", str)
+        if not stored:
+            return
+        restored_path = Path(stored)
+        if restored_path.exists():
+            self.set_root_directory(restored_path)
 
     def remove_selected_rows(self) -> None:
         """選択行を削除してJSON保存対象から除外する。"""
@@ -290,6 +340,12 @@ class AssetLicenseMainWindow(QMainWindow):
 
         self.table.setItem(row, self.COLUMN_URL, self._editable_item(record.url))
         self.table.setItem(row, self.COLUMN_ATTRIBUTION, self._editable_item(record.attribution))
+        url_item = self.table.item(row, self.COLUMN_URL)
+        if url_item is not None:
+            url_item.setToolTip(url_item.text())
+        attribution_item = self.table.item(row, self.COLUMN_ATTRIBUTION)
+        if attribution_item is not None:
+            attribution_item.setToolTip(attribution_item.text())
 
     def _on_item_changed(self, changed_item: QTableWidgetItem) -> None:
         """セル変更時にステータスとDirtyフラグを更新する。
@@ -299,6 +355,8 @@ class AssetLicenseMainWindow(QMainWindow):
         """
         if self._is_populating:
             return
+        if changed_item.column() in {self.COLUMN_URL, self.COLUMN_ATTRIBUTION}:
+            changed_item.setToolTip(changed_item.text())
         if changed_item.column() not in {self.COLUMN_URL, self.COLUMN_ATTRIBUTION}:
             return
 
@@ -441,6 +499,7 @@ class AssetLicenseMainWindow(QMainWindow):
 
     def _sanitize_markdown_text(self, text: str) -> str:
         """Markdownリンクをテキスト形式へ置換する。"""
+        text = text.replace("\\n", "\n")
         replaced = self.MARKDOWN_LINK_PATTERN.sub(r"\1 (\2)", text)
         return self._collapse_blank_lines(replaced)
 

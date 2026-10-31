@@ -5,12 +5,27 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from PySide6.QtGui import QCloseEvent
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QMessageBox
+from PySide6.QtCore import QSettings, Qt
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from asset_license_manager.core import STATUS_FILE_NOT_FOUND, STATUS_FILLED, STATUS_MISSING
 from asset_license_manager.ui import AssetLicenseMainWindow
+
+
+@pytest.fixture(autouse=True)
+def isolate_qsettings(tmp_path: Path):
+    """各テストでQSettings保存先を隔離する。"""
+    QSettings.setDefaultFormat(QSettings.IniFormat)
+    QSettings.setPath(QSettings.IniFormat, QSettings.UserScope, str(tmp_path / "qsettings"))
+    settings = QSettings(
+        AssetLicenseMainWindow.SETTINGS_ORG,
+        AssetLicenseMainWindow.SETTINGS_APP,
+    )
+    settings.clear()
+    settings.sync()
+    yield
 
 
 def _touch_file(path: Path) -> None:
@@ -69,7 +84,7 @@ def test_main_window_initializes_with_table_structure(qtbot) -> None:
     qtbot.addWidget(window)
 
     assert window.table.columnCount() == 7
-    assert window.table.horizontalHeaderItem(window.COLUMN_CHECK).text() == "[選]"
+    assert window.table.horizontalHeaderItem(window.COLUMN_CHECK).text() == ""
     assert window.table.horizontalHeaderItem(window.COLUMN_ATTRIBUTION).text() == "Attribution"
     assert window.table.rowCount() == 0
     assert window.is_dirty is False
@@ -85,6 +100,24 @@ def test_set_root_directory_populates_grid_and_clears_dirty(tmp_path: Path, qtbo
 
     assert window.table.rowCount() == 3
     assert str(root) in window.path_label.text()
+    assert window.is_dirty is False
+
+
+def test_restore_last_root_directory_from_qsettings(tmp_path: Path, qtbot) -> None:
+    """起動時に前回素材フォルダを復元し自動同期する。"""
+    root = _prepare_assets_root(tmp_path)
+    settings = QSettings(
+        AssetLicenseMainWindow.SETTINGS_ORG,
+        AssetLicenseMainWindow.SETTINGS_APP,
+    )
+    settings.setValue(AssetLicenseMainWindow.SETTINGS_LAST_ROOT_KEY, str(root))
+    settings.sync()
+
+    window = AssetLicenseMainWindow()
+    qtbot.addWidget(window)
+
+    assert window.current_root_dir == root
+    assert window.table.rowCount() == 3
     assert window.is_dirty is False
 
 
@@ -158,7 +191,8 @@ def test_generate_credit_text_writes_expected_sections(tmp_path: Path, qtbot, mo
     filled_row = _find_row_by_file_name(window, "filled.wav")
     window.table.item(missing_row, window.COLUMN_CHECK).setCheckState(Qt.Checked)
     window.table.item(filled_row, window.COLUMN_CHECK).setCheckState(Qt.Checked)
-    window.table.item(filled_row, window.COLUMN_ATTRIBUTION).setText("[SE素材](https://commons.nicovideo.jp/material/nc12345)")
+    window.table.item(filled_row, window.COLUMN_ATTRIBUTION).setText("[SE素材]\\n詳細(https://commons.nicovideo.jp/material/nc12345)")
+    window.table.item(filled_row, window.COLUMN_URL).setText("https://example.com/path\\nhttps://example.com/path2")
 
     output_path = tmp_path / "credit.txt"
     monkeypatch.setattr(
@@ -170,11 +204,54 @@ def test_generate_credit_text_writes_expected_sections(tmp_path: Path, qtbot, mo
     output = output_path.read_text(encoding="utf-8")
 
     assert "【クレジット表記】" in output
-    assert "SE素材 (https://commons.nicovideo.jp/material/nc12345)" in output
+    assert "SE素材" in output
+    assert "詳細(https://commons.nicovideo.jp/material/nc12345)" in output
+    assert "https://example.com/path\nhttps://example.com/path2" in output
     assert "【ニコニ・コモンズ 親作品登録用ID】" in output
     assert "nc12345" in output
     assert "【出展確認素材（要確認リスト）】" in output
     assert "audio/bgm/missing.mp3" in output
+
+
+def test_intelligent_paste_repeats_single_row_for_multi_selection(tmp_path: Path, qtbot, monkeypatch) -> None:
+    """1行TSVを複数選択行へ繰り返し貼り付けできる。"""
+    root = _prepare_assets_root(tmp_path)
+    window = AssetLicenseMainWindow()
+    qtbot.addWidget(window)
+    window.show()
+    window.set_root_directory(root)
+
+    window.table.setCurrentCell(0, window.COLUMN_URL)
+    window.table.setFocus()
+    QApplication.clipboard().setText("https://example.com/new\tRepeated Attribution")
+
+    class _Range:
+        def topRow(self) -> int:
+            return 0
+
+        def bottomRow(self) -> int:
+            return 1
+
+        def leftColumn(self) -> int:
+            return window.COLUMN_URL
+
+    class _Index:
+        def __init__(self, row: int) -> None:
+            self._row = row
+
+        def row(self) -> int:
+            return self._row
+
+    monkeypatch.setattr(window.table, "selectedRanges", lambda: [_Range()])
+    monkeypatch.setattr(window.table, "selectedIndexes", lambda: [_Index(0), _Index(1)])
+
+    window.table._paste_tabular_text()
+
+    assert window.table.item(0, window.COLUMN_URL).text() == "https://example.com/new"
+    assert window.table.item(0, window.COLUMN_ATTRIBUTION).text() == "Repeated Attribution"
+    assert window.table.item(1, window.COLUMN_URL).text() == "https://example.com/new"
+    assert window.table.item(1, window.COLUMN_ATTRIBUTION).text() == "Repeated Attribution"
+    assert window.is_dirty is True
 
 
 def test_close_event_behavior_follows_dirty_state(tmp_path: Path, qtbot, monkeypatch) -> None:
